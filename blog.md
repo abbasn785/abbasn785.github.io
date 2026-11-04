@@ -12,7 +12,7 @@ That should make you a little nervous. You're now stacking one non-deterministic
 
 ## First, what "evaluating an agent" means
 
-You can evaluate an agent on a lot of axes: did it pick the right tools, was its reasoning trajectory sound, did it stay on task. This post is about the one that matters most to a user: **answer correctness.** Was the final answer right?
+You can evaluate an agent on a lot of axes such as whether it picked the right tools, followed a sound reasoning process, or stayed on task. This post is about the one that matters most to a user: **answer correctness.** Was the final answer right?
 
 Grading answer correctness needs three ingredients:
 
@@ -22,7 +22,7 @@ Grading answer correctness needs three ingredients:
 
 The obvious way to get #3 is to do what unit tests do: freeze a set of inputs, run your agent against them at test time, grade the results. That works fine for a self-contained agent. But if your agent depends on live telemetry (metrics, logs, the current state of a system), a frozen input is a lie. The world the agent investigates has moved on since you captured the test case.
 
-For my system, the better approach was to dark-launch the agent: run it silently against real, live triggers in real time, alongside whatever human or existing process currently does that job. Then you collect both the agent's output and the real validated output, and grade them against each other. The agent is being tested on the same conditions it'll face in production, because they are production.
+For my system, the better approach was to dark-launch the agent: run it silently against real, live triggers in real time, alongside whatever human or existing process currently does that job. Then you collect both the agent's output and the real validated output, and grade them against each other. The agent is being tested under the same conditions it'll face in production, because they are production.
 
 That collection step, quietly gathering both sides, is where the guardrails live.
 
@@ -38,15 +38,15 @@ The fix was to stop asking the LLM to do things a script does better. I codified
 
 The principle generalizes: **an LLM should touch the smallest possible surface of your eval.** Every step you can express as code, express as code. Reserve the model for the irreducibly fuzzy judgment, and hand it clean, complete, structured inputs when you do. Determinism everywhere you can afford it is what makes the one non-deterministic step easier to audit and validate.
 
-## Guardrail 2: Isolate Each Judgement
+## Guardrail 2: Isolate each judgment
 
-An LLM's context window is a double-edged sword. It's what lets a model remember a mistake and not repeat it, but it's also how bias creeps in. Context is active input: a model tends to incorporate what's in its window even when that content is irrelevant to the task. So whatever you put in front of the judge shapes its answer, whether you meant it to or not. The design question isn't just "what does the judge need to see?" It's "what could it see that would bias the exact judgment I'm asking for?"
+An LLM's context window is a double-edged sword. It's what lets a model remember a mistake and not repeat it, but it's also how bias creeps in. A model tends to incorporate what's in its window even when that content is irrelevant to the task. So whatever you put in front of the judge shapes its answer, whether you meant it to or not. The design question isn't just "what does the judge need to see?" It's "what could it see that would bias the exact judgment I'm asking for?"
 
 An example in my system came from grading several agents at once. I was evaluating four agents on the same input, and the efficient-looking move was to hand the judge everything together (the ground truth plus all four agents' answers) and ask for a score per agent. It scored, but the scores were subtly wrong, and it took me a while to see why.
 
-With four RCAs sharing one context window, the judge blurred them. While grading agent A, it would consider a detail that agent B had actually raised, mistake a detail from agent C's output for ground truth, or let one strong answer in the batch affect the score of a weak one sitting next to it. Each agent was being graded partly against the *other agents* instead of purely against the ground truth. Put four answers in the window and the model treats all four as fair game. Again: context is active input, not a set of labeled boxes it keeps separate on your behalf.
+With four root-cause analyses (RCA) sharing one context window, the judge blurred them. While grading agent A, it would consider a detail that agent B had actually raised, mistake a detail from agent C's output for ground truth, or let one strong answer in the batch affect the score of a weak one sitting next to it. Each agent was being graded partly against the *other agents* instead of purely against the ground truth. Put four answers in the window and the model treats all four as fair game. Again: context is active input, not a set of labeled boxes it keeps separate on your behalf.
 
-The fix is isolation. One grading call per agent, and that call sees exactly two things: that agent's output and the ground truth. Nothing about the other agents, not even that they exist. A score for agent A is now a function of A and the truth alone. It comes out the same whether A is graded alongside three brilliant answers or three terrible ones, which is the whole point of a fair comparison.
+The fix is isolation. One grading call per agent, and that call sees two things: that agent's output and the ground truth. Nothing about the other agents, not even that they exist. A score for agent A is now a function of A and the truth alone. It comes out the same whether A is graded alongside three brilliant answers or three terrible ones, which is the whole point of a fair comparison.
 
 More broadly: at every step, ask what the model is allowed to see, and cut anything that could bias the specific judgment you're asking for. Blind the judge to information it doesn't strictly need. Context rot is subtle precisely because the model never tells you it happened: it won't flag that a stray input swayed it, it just quietly folds that input into the answer, and the score drifts.
 
@@ -58,14 +58,15 @@ If you're building an agent, it's possible that its job is being done by a human
 
 So put a **completeness gate** in front of your ground truth. Before an input counts, require the metadata and fields that mark a *finished* correct answer: a status flag, specific required fields, non-placeholder content. If the ground truth isn't complete, the case doesn't enter the eval. It's better to grade fewer cases well than many cases against fiction.
 
-Some gaps a field check can't catch. A record can have every required field filled and still be too thin to grade against if it has a vague sentence where a real mechanism should be. For that I run a separate LLM check whose only job is to decide whether the ground truth establishes a real, gradable answer at all. This is where Guardrail 2 comes back around as that check sees *only* the ground truth, never any agent's output.
+Field checks can’t catch every gap. A record can have every required field filled and still be too thin to grade against if it has a vague sentence where a real mechanism should be. For that I run a separate LLM check whose only job is to decide whether the ground truth establishes a real, gradable answer at all. This is where Guardrail 2 comes back around as that check sees *only* the ground truth, never any agent's output.
 
 ## Validating the judge
+
 These guardrails make the grading process more controlled. But they leave one question unanswered: does the judge actually score answers the way a human would?
 
 To check, we gave human reviewers the same incident inputs and root-cause analyses we gave the judge. They scored them independently, without seeing the judge’s scores. We then compared the human and LLM scores to assess how closely they agreed.
 
-That comparison matters because a consistent judge can still be consistently wrong. Agreement with independent human reviewers gives us evidence that the scores reflect human assessments
+That comparison matters because a consistent judge can still be consistently wrong. Agreement with independent human reviewers gives us evidence that the scores reflect human assessments.
 
 ## The through line
 
