@@ -10,11 +10,11 @@ So we do the next best thing: we use an LLM's natural-language understanding to 
 
 That should make you a little nervous. You're now stacking one non-deterministic system on top of another and asking the top one to be a fair, consistent judge. It can be, but only if you build guardrails around it. After building one of these systems and watching it fail in instructive ways, I've landed on three.
 
-## First, what "evaluating an agent" even means
+## First, what "evaluating an agent" means
 
-You can evaluate an agent on a lot of axes: did it pick the right tools, was its reasoning trajectory sound, did it stay on task. This post is about the one that ultimately matters most to a user: **answer correctness.** Was the final answer right?
+You can evaluate an agent on a lot of axes: did it pick the right tools, was its reasoning trajectory sound, did it stay on task. This post is about the one that matters most to a user: **answer correctness.** Was the final answer right?
 
-Grading answer correctness needs exactly three ingredients:
+Grading answer correctness needs three ingredients:
 
 1. A set of inputs that your agent responds to.
 2. The validated correct output for each input to serve as the ground truth.
@@ -22,7 +22,7 @@ Grading answer correctness needs exactly three ingredients:
 
 The obvious way to get #3 is to do what unit tests do: freeze a set of inputs, run your agent against them at test time, grade the results. That works fine for a self-contained agent. But if your agent depends on live telemetry (metrics, logs, the current state of a system), a frozen input is a lie. The world the agent investigates has moved on since you captured the test case.
 
-The better approach is to dark-launch the agent: run it silently against real, live triggers in real time, alongside whatever human or existing process currently does that job. Then you collect both the agent's output and the real validated output, and grade them against each other. The agent is being tested on exactly the conditions it'll face in production, because they are production.
+For my system, the better approach was to dark-launch the agent: run it silently against real, live triggers in real time, alongside whatever human or existing process currently does that job. Then you collect both the agent's output and the real validated output, and grade them against each other. The agent is being tested on the same conditions it'll face in production, because they are production.
 
 That collection step, quietly gathering both sides, is where the guardrails live.
 
@@ -34,15 +34,13 @@ I built the whole eval system as an agentic workflow: a single AI agent, armed w
 
 It turned out to be a mess. The collector would disregard explicit instructions about how to gather outputs. Most damagingly, it would *summarize* the outputs it collected instead of preserving them verbatim, quietly dropping detail that the grade depended on. And over a long session it made the ordinary mistakes long-context LLMs make, such as instruction-following decaying and earlier rules falling out of focus. I ended up babysitting every run. I was hand-checking each score, confirming it had actually followed the rubric, and kicking it back to regrade again and again. I couldn't trust a score, because I couldn't trust that the thing being scored had even been captured faithfully.
 
-The fix was to stop asking the LLM to do things a script does better. I codified the entire collection and normalization pipeline in plain, deterministic code: fetch each output from its source, preserve it byte-for-byte, structure it into a known schema. The LLM's job shrank to the *one* step that genuinely requires language understanding: the grade itself.
+The fix was to stop asking the LLM to do things a script does better. I codified the entire collection and normalization pipeline in plain, deterministic code: fetch each output from its source, preserve the full original content, and structure it into a known schema. The LLM's job shrank to the *one* step that genuinely requires language understanding: the grade itself.
 
-The principle generalizes: **an LLM should touch the smallest possible surface of your eval.** Every step you can express as code, express as code. Reserve the model for the irreducibly fuzzy judgment, and hand it clean, complete, structured inputs when you do. Determinism everywhere you can afford it is what makes the one non-deterministic step trustworthy.
+The principle generalizes: **an LLM should touch the smallest possible surface of your eval.** Every step you can express as code, express as code. Reserve the model for the irreducibly fuzzy judgment, and hand it clean, complete, structured inputs when you do. Determinism everywhere you can afford it is what makes the one non-deterministic step easier to audit and validate.
 
-## Guardrail 2: Limit context rot
+## Guardrail 2: Isolate Each Judgement
 
-An LLM's context window is a double-edged sword. It's what lets a model remember a mistake and not repeat it. But it's also how bias creeps in: the model weighs something it *shouldn't* be seeing, and it quietly tilts a later judgment. The gradual decline in output quality driven by *what's in the window* (not by hitting the length limit) has a name: context rot ([see article by Jake Minns](https://towardsdatascience.com/governed-context-managing-context-rot-in-claude-code/)).
-
-It's tempting to treat everything you hand the model as passive reference material: there if it's relevant, ignored if it's not. It isn't. Context is active input: a model tends to incorporate what's in its window even when that content is irrelevant to the task. So whatever you put in front of the judge shapes its answer, whether you meant it to or not. The design question isn't just "what does the judge need to see?" It's "what could it see that would bias the exact judgment I'm asking for?"
+An LLM's context window is a double-edged sword. It's what lets a model remember a mistake and not repeat it, but it's also how bias creeps in. Context is active input: a model tends to incorporate what's in its window even when that content is irrelevant to the task. So whatever you put in front of the judge shapes its answer, whether you meant it to or not. The design question isn't just "what does the judge need to see?" It's "what could it see that would bias the exact judgment I'm asking for?"
 
 An example in my system came from grading several agents at once. I was evaluating four agents on the same input, and the efficient-looking move was to hand the judge everything together (the ground truth plus all four agents' answers) and ask for a score per agent. It scored, but the scores were subtly wrong, and it took me a while to see why.
 
@@ -56,14 +54,21 @@ More broadly: at every step, ask what the model is allowed to see, and cut anyth
 
 Here's the assumption that will burn you: that your ground truth is perfect.
 
-If you're building an agent, its job is almost certainly being done by a human today, and the "correct" outputs you're grading against are whatever those humans produced. Human outputs are **incomplete.** People fill in the fields they care about, skip the ones they don't, leave placeholders, and move on. Grade a perfectly good agent answer against a half-empty human record and you'll score the agent as wrong when it was the record that was lacking.
+If you're building an agent, it's possible that its job is being done by a human today, and the "correct" outputs you're grading against are whatever those humans produced. Human outputs can be **incomplete.** People often fill in the fields they care about, skip the ones they don't, leave placeholders, and move on. Grade a perfectly good agent answer against a half-empty human record and you'll score the agent as wrong when it was the record that was lacking.
 
 So put a **completeness gate** in front of your ground truth. Before an input counts, require the metadata and fields that mark a *finished* correct answer: a status flag, specific required fields, non-placeholder content. If the ground truth isn't complete, the case doesn't enter the eval. It's better to grade fewer cases well than many cases against fiction.
 
-Some gaps a field check can't catch. A record can have every required field filled and still be too thin to grade against: a vague sentence where a real mechanism should be. For that I run a separate LLM check whose only job is to decide whether the ground truth establishes a real, gradable answer at all. And this is where Guardrail 2 comes back around: that check sees *only* the ground truth, never any agent's output. If I let it see a confident, fluent agent answer, that answer could talk it into treating a stub as gradable, the model reading "this all sounds plausible" and waving through ground truth that says nothing. Blind to the answers, a placeholder reads as a placeholder every time.
+Some gaps a field check can't catch. A record can have every required field filled and still be too thin to grade against if it has a vague sentence where a real mechanism should be. For that I run a separate LLM check whose only job is to decide whether the ground truth establishes a real, gradable answer at all. This is where Guardrail 2 comes back around as that check sees *only* the ground truth, never any agent's output.
+
+## Validating the judge
+These guardrails make the grading process more controlled. But they leave one question unanswered: does the judge actually score answers the way a human would?
+
+To check, we gave human reviewers the same incident inputs and root-cause analyses we gave the judge. They scored them independently, without seeing the judge’s scores. We then compared the human and LLM scores to assess how closely they agreed.
+
+That comparison matters because a consistent judge can still be consistently wrong. Agreement with independent human reviewers gives us evidence that the scores reflect human assessments
 
 ## The through line
 
 None of these guardrails are about making the LLM smarter. They're about **boxing it in**: shrinking its job, controlling what it sees, and refusing to grade against truth you haven't verified is true and whole.
 
-AI grading AI is genuinely workable, but the trust doesn't come from the model. It comes from the deterministic scaffolding you build around it: code for everything code can do, blindness where bias would creep in, and a hard gate on the quality of your ground truth. Get those right and the one fuzzy step in the middle, the judgment only a language model can make, becomes something you can actually rely on.
+AI grading AI is workable, but the trust doesn't come from the model. It comes from the deterministic scaffolding you build around it: code for everything code can do, blindness where bias would creep in, and a hard gate on the quality of your ground truth. Get those right and the one fuzzy step in the middle, the judgment that a language model can make, becomes something you can use with more confidence.
